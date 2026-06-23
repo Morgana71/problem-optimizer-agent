@@ -99,6 +99,60 @@ def score_question_quality(question: str) -> dict:
     }
 
 
+def score_requirement_context(messages: list[dict[str, str]]) -> dict:
+    """基于历史对话综合评估需求清晰度，避免只看最近一条短回复。"""
+    user_texts = [m.get("content", "") for m in messages if m.get("role") == "user"]
+    assistant_texts = [m.get("content", "") for m in messages if m.get("role") == "assistant"]
+    combined_user_text = "\n".join(user_texts).strip()
+
+    if not combined_user_text:
+        result = score_question_quality("我想做一个校园二手交易平台，应该怎么做？")
+        result["turn_count"] = 0
+        result["basis"] = "示例需求"
+        return result
+
+    # 用户输入代表真实需求来源；助手输出代表已经沉淀出的需求分析上下文。
+    assistant_context = "\n".join(assistant_texts[-3:])
+    combined_context = f"{combined_user_text}\n{assistant_context}".strip()
+    result = score_question_quality(combined_context)
+
+    turn_count = len(user_texts)
+    progress_bonus = min(18, max(0, turn_count - 1) * 6)
+
+    option_detail_patterns = [
+        r"\b[ABCD]\b",
+        r"\b\d+[A-D]\b",
+        "默认",
+        "确认",
+        "MVP",
+        "发布",
+        "优先",
+        "角色",
+        "页面",
+        "流程",
+        "验收",
+        "约束",
+    ]
+    detail_hits = sum(1 for pattern in option_detail_patterns if re.search(pattern, combined_user_text, re.IGNORECASE))
+    detail_bonus = min(12, detail_hits * 2)
+
+    accumulated_score = min(100, result["score"] + progress_bonus + detail_bonus)
+    result["score"] = round(accumulated_score, 1)
+    result["turn_count"] = turn_count
+    result["basis"] = "历史对话综合诊断"
+
+    if result["score"] >= 80:
+        result["level"] = "较清晰"
+    elif result["score"] >= 60:
+        result["level"] = "基本清晰但仍需优化"
+    elif result["score"] >= 40:
+        result["level"] = "较模糊"
+    else:
+        result["level"] = "非常模糊"
+
+    return result
+
+
 def format_tool_analysis(question: str) -> str:
     """格式化工具分析结果，作为上下文传给大模型。"""
     result = score_question_quality(question)

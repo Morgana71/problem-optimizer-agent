@@ -19,7 +19,7 @@ import streamlit as st
 from llm_client import LLMConfig, PROVIDER_DEFAULTS, call_openai_compatible
 from pdf_generator import markdown_to_pdf_bytes, safe_filename_from_question
 from prompt_templates import build_chat_messages
-from utils import build_mock_chat_response, format_tool_analysis, score_question_quality
+from utils import build_mock_chat_response, format_tool_analysis, score_requirement_context
 
 
 APP_TITLE = "软件需求工程分析智能体"
@@ -424,17 +424,19 @@ with chat_tab:
 
     with right_col:
         st.subheader("实时需求诊断")
-        current_question = st.session_state.last_question or "我想做一个校园二手交易平台，应该怎么做？"
-        quality = score_question_quality(current_question)
+        quality = score_requirement_context(st.session_state.messages)
         st.metric("需求问题质量评分", f"{quality['score']} / 100")
         st.write(f"**清晰度等级：** {quality['level']}")
+        st.write(f"**诊断依据：** {quality.get('basis', '历史对话综合诊断')}")
+        if quality.get("turn_count", 0):
+            st.write(f"**累计用户轮次：** {quality['turn_count']}")
         st.write("**已包含要素：**")
         st.write("、".join(quality["present_dimensions"]) if quality["present_dimensions"] else "暂无明显要素")
         st.write("**缺失要素：**")
         st.write("、".join(quality["missing_dimensions"]) if quality["missing_dimensions"] else "未发现明显缺失")
         st.write("**关键词：**")
         st.write("、".join(quality["keywords"]) if quality["keywords"] else "未提取到明显关键词")
-        st.caption("该轻量分析会作为工具上下文提供给智能体，帮助它先澄清需求再给方案。")
+        st.caption("该诊断会综合历史用户输入和已沉淀的需求分析内容，避免只按最近一条短回复评分。")
 
         st.divider()
         if st.button("基于最近回答生成 PDF", use_container_width=True, disabled=not bool(st.session_state.last_report)):
