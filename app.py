@@ -7,7 +7,6 @@ streamlit run app.py
 
 from __future__ import annotations
 
-import base64
 import html
 import os
 import time
@@ -63,11 +62,18 @@ CUSTOM_CSS = """
     color: #666;
     font-size: 0.92rem;
 }
-.pdf-preview {
-    width: 100%;
-    height: 620px;
+.markdown-preview {
+    max-height: 620px;
+    overflow-y: auto;
+    padding: 1rem 1.1rem;
     border: 1px solid #dddddd;
     border-radius: 8px;
+    background: #ffffff;
+}
+.preview-note {
+    color: #666;
+    font-size: 0.92rem;
+    margin-bottom: 0.6rem;
 }
 .chat-panel {
     border: 1px solid #e6e6e6;
@@ -133,7 +139,7 @@ def init_session_state() -> None:
                 "role": "assistant",
                 "content": (
                     "你好，我是软件需求工程分析智能体。你可以直接和我对话，例如描述一个想做的软件项目，"
-                    "我会帮你澄清需求、分析问题、拆解功能、设计业务流程，并在需要时生成可预览和下载的 PDF 文档。"
+                    "我会帮你澄清需求、分析问题、拆解功能、设计业务流程，并在需要时生成可预览报告正文和可下载的 PDF 文档。"
                 ),
             }
         ],
@@ -170,13 +176,17 @@ def should_typewriter(user_text: str, assistant_text: str) -> bool:
     return 0 < len(assistant_text) <= TYPEWRITER_MAX_CHARS
 
 
-def render_pdf_preview(pdf_bytes: bytes) -> None:
-    """在页面中预览 PDF。"""
-    encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    st.markdown(
-        f'<iframe class="pdf-preview" src="data:application/pdf;base64,{encoded}"></iframe>',
-        unsafe_allow_html=True,
-    )
+def render_markdown_preview(report_markdown: str) -> None:
+    """稳定预览报告正文：不再内嵌 PDF，避免 Edge / Streamlit iframe 拦截。"""
+    if not report_markdown:
+        st.info("暂无可预览的报告内容。")
+        return
+
+    st.markdown("### 报告内容预览")
+    st.caption("这里预览的是智能体生成的 Markdown 报告正文；正式 PDF 请点击上方按钮下载。")
+    st.markdown('<div class="markdown-preview">', unsafe_allow_html=True)
+    st.markdown(report_markdown)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def build_config(
@@ -425,9 +435,9 @@ with st.container():
                     use_container_width=True,
                 )
             with preview_col:
-                show_pdf_preview = st.toggle("预览", value=False)
-            if show_pdf_preview:
-                render_pdf_preview(st.session_state.last_pdf)
+                show_report_preview = st.toggle("预览报告内容", value=False)
+            if show_report_preview:
+                render_markdown_preview(st.session_state.last_report)
         if st.session_state.get("last_error_trace"):
             with st.expander("查看最近错误详情"):
                 st.code(st.session_state.last_error_trace)
@@ -470,4 +480,4 @@ with st.container():
                 title="软件需求工程分析智能体文档",
             )
             st.session_state.pdf_ready = True
-            st.success("PDF 已生成，可在对话区下方下载或预览。")
+            st.success("PDF 已生成，可在对话区下方下载，并可预览报告正文。")
