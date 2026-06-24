@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import time
 import traceback
 from datetime import datetime
@@ -39,6 +40,57 @@ PDF_TRIGGER_KEYWORDS = [
 ]
 TYPEWRITER_MAX_CHARS = 900
 TYPEWRITER_DELAY_SECONDS = 0.012
+
+DOWNLOAD_NOTICE = "PDF 文档已由系统生成，请使用页面下方的“下载 PDF 文档”按钮下载。"
+DOWNLOAD_LINK_LABEL_KEYWORDS = [
+    "下载", "PDF", "pdf", "文档", "报告", "需求规格", "需求说明", "说明书", "导出"
+]
+
+
+def clean_fake_download_links(text: str) -> str:
+    """清理大模型可能生成的“假下载链接”。
+
+    真实 PDF 下载由 Streamlit 的 st.download_button 提供。
+    这里把模型正文里的 Markdown 下载链接或“点击此处下载”文案替换为稳定提示，
+    避免用户误以为正文中的蓝色下划线文字可以触发文件下载。
+    """
+    if not text:
+        return text
+
+    cleaned = text
+
+    # 1) 将 Markdown 文件/下载类链接改为普通文字说明。
+    #    例如：[PDF版需求规格说明书](#)、[点击下载](xxx)。
+    def replace_markdown_link(match: re.Match) -> str:
+        label = match.group(1).strip()
+        url = match.group(2).strip()
+        if any(keyword in label for keyword in DOWNLOAD_LINK_LABEL_KEYWORDS):
+            return f"{label}（{DOWNLOAD_NOTICE}）"
+        # 明显的空链接也不保留，避免出现不可点击假链接。
+        if url in {"", "#"} or url.lower().startswith(("javascript:", "about:blank")):
+            return label
+        return match.group(0)
+
+    cleaned = re.sub(r"\[([^\]]+)\]\(([^)]*)\)", replace_markdown_link, cleaned)
+
+    # 2) 清理常见“点击此处下载/点此下载/下载链接”等无真实绑定的文案。
+    phrase_patterns = [
+        r"点击此处下载\s*[:：]?\s*",
+        r"点此下载\s*[:：]?\s*",
+        r"点击下载\s*[:：]?\s*",
+        r"下载链接\s*[:：]?\s*",
+        r"PDF\s*下载链接\s*[:：]?\s*",
+        r"请点击(?:上方|下方|此处)?\s*下载\s*[:：]?\s*",
+    ]
+    for pattern in phrase_patterns:
+        cleaned = re.sub(pattern, f"{DOWNLOAD_NOTICE} ", cleaned, flags=re.IGNORECASE)
+
+    # 3) 合并连续重复的下载提示。
+    duplicate_notice_pattern = rf"(?:{re.escape(DOWNLOAD_NOTICE)}\s*){{2,}}"
+    cleaned = re.sub(duplicate_notice_pattern, DOWNLOAD_NOTICE + " ", cleaned)
+
+    return cleaned.strip()
+
 
 
 st.set_page_config(
@@ -139,7 +191,7 @@ def init_session_state() -> None:
                 "role": "assistant",
                 "content": (
                     "你好，我是软件需求工程分析智能体。你可以直接和我对话，例如描述一个想做的软件项目，"
-                    "我会帮你澄清需求、分析问题、拆解功能、设计业务流程，并在需要时生成可预览报告正文和可下载的 PDF 文档。"
+                    "我会帮你澄清需求、分析问题、拆解功能、设计业务流程，并在需要时生成可预览报告正文和可下载的 PDF 文档。PDF 请使用页面下方的“下载 PDF 文档”按钮获取。"
                 ),
             }
         ],
@@ -178,6 +230,7 @@ def should_typewriter(user_text: str, assistant_text: str) -> bool:
 
 def render_markdown_preview(report_markdown: str) -> None:
     """稳定预览报告正文：不再内嵌 PDF，避免 Edge / Streamlit iframe 拦截。"""
+    report_markdown = clean_fake_download_links(report_markdown)
     if not report_markdown:
         st.info("暂无可预览的报告内容。")
         return
@@ -250,6 +303,7 @@ def generate_assistant_response(
         )
         assistant_text = call_openai_compatible(messages, config)
 
+    assistant_text = clean_fake_download_links(assistant_text)
     st.session_state.last_report = assistant_text
 
     if should_generate_pdf(user_input, assistant_text):
@@ -423,7 +477,7 @@ with st.container():
             st.rerun()
 
         if st.session_state.pdf_ready and st.session_state.last_pdf:
-            st.success("已生成可下载的 PDF 文档。")
+            st.success("已生成可下载的 PDF 文档。请使用下方“下载 PDF 文档”按钮获取文件。")
             pdf_filename = safe_filename_from_report(st.session_state.last_report, suffix="pdf")
             pdf_col, preview_col = st.columns([0.72, 0.28])
             with pdf_col:
@@ -475,9 +529,11 @@ with st.container():
 
         st.divider()
         if st.button("基于最近回答生成 PDF", use_container_width=True, disabled=not bool(st.session_state.last_report)):
+            cleaned_report = clean_fake_download_links(st.session_state.last_report)
+            st.session_state.last_report = cleaned_report
             st.session_state.last_pdf = markdown_to_pdf_bytes(
-                st.session_state.last_report,
+                cleaned_report,
                 title="软件需求工程分析智能体文档",
             )
             st.session_state.pdf_ready = True
-            st.success("PDF 已生成，可在对话区下方下载，并可预览报告正文。")
+            st.success("PDF 已生成，请在对话区下方使用“下载 PDF 文档”按钮下载，并可预览报告正文。")
