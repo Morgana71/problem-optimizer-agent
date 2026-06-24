@@ -18,9 +18,194 @@ import streamlit as st
 
 from llm_client import LLMConfig, PROVIDER_DEFAULTS, call_openai_compatible
 from pdf_generator import markdown_to_pdf_bytes, safe_filename_from_report
-from prompt_templates import build_chat_messages, build_document_messages
+try:
+    from prompt_templates import build_chat_messages, build_document_messages
+except ImportError:
+    # 兼容保护：如果线上 prompt_templates.py 还停留在旧版本，
+    # 不让应用在启动阶段崩溃；后续仍建议同步更新 prompt_templates.py。
+    from prompt_templates import build_chat_messages
+
+    def _format_history_for_document_fallback(
+        chat_history: list[dict[str, str]],
+        max_history: int = 30,
+    ) -> str:
+        selected = chat_history[-max_history:]
+        lines = []
+        for index, message in enumerate(selected, start=1):
+            role = message.get("role", "").strip()
+            content = str(message.get("content", "")).strip()
+            if not content:
+                continue
+            label = "用户" if role == "user" else "智能体" if role == "assistant" else role or "未知"
+            if len(content) > 3500:
+                content = content[:3500] + "\n……（该轮内容过长，已截断）"
+            lines.append(f"【{index}. {label}】\n{content}")
+        return "\n\n".join(lines) if lines else "暂无历史对话。"
+
+    def build_document_messages(
+        chat_history: list[dict[str, str]],
+        domain: str,
+        tool_analysis: str,
+        agent_context: str = "暂无",
+        previous_document: str = "",
+        document_version: int = 1,
+        max_history: int = 30,
+    ) -> list[dict[str, str]]:
+        previous = previous_document.strip() or "暂无上一版完整文档。"
+        if len(previous) > 9000:
+            previous = previous[:9000] + "\n……（上一版文档过长，已截断；请保留其核心结构并融合最新修改。）"
+        history_text = _format_history_for_document_fallback(chat_history, max_history=max_history)
+        system_prompt = f"""
+你是一个资深软件需求工程文档生成专家，当前固定领域为：{domain}。
+
+你的任务是基于完整历史对话、会话记忆、系统轻量分析结果和上一版文档，生成“当前最新版完整正式软件需求工程分析文档”。
+
+重要要求：
+1. 不要只总结最近一条回复。
+2. 不要只回复“已完成”“已确认”“请下载”等短句。
+3. 必须综合全部历史对话，尤其以用户最新确认和修改意见为准。
+4. 如果存在上一版完整文档，请在其基础上融合最新修改，输出完整新版文档。
+5. 文档必须完整、正式、可直接转换为 PDF 并用于课程/正式展示场合。
+6. PDF 下载由系统页面下方“下载 PDF 文档”按钮提供，正文中严禁生成 Markdown 下载链接、虚假文件链接或“点击此处下载”文案。
+7. 输出语言必须为中文，使用 Markdown。
+
+输出必须包含以下结构：
+# 软件需求工程分析文档
+
+## 文档信息
+项目名称、文档版本、生成时间、文档状态、适用范围。
+
+## 1. 愿景和范围
+业务背景、业务机遇、业务目标、成功指标、愿景陈述、范围、限制、业务风险、假设与依赖。
+
+## 2. 干系人与用户分析
+干系人、目标用户、用户类别、主要价值、约束和关注点。
+
+## 3. 用例分析
+主要操作者、用例列表、核心用例详情、正常流程、异常流程、后置条件和业务规则。
+
+## 4. 软件需求规范
+功能需求、非功能需求、数据需求、外部接口需求、操作环境、设计与实现约束。
+
+## 5. 分析模型
+业务流程、领域对象、数据模型、状态流转、权限模型。
+
+## 6. 业务规则
+使用 BR-编号 描述关键业务规则。
+
+## 7. 界面原型说明
+主要页面、字段、操作入口、交互流程和页面跳转关系。
+
+## 8. 验收标准
+功能验收、性能验收、安全验收、文档验收和演示验收。
+
+## 9. 风险与改进方向
+技术风险、业务风险、实施风险和后续改进方向。
+
+## 10. 版本变更记录
+说明本版文档吸收了哪些历史对话中的确认项、修改项和默认假设。
+""".strip()
+        user_prompt = f"""
+请生成第 V{document_version} 版完整正式软件需求工程分析文档。
+
+【系统轻量分析结果】
+{tool_analysis}
+
+【智能体能力与会话记忆】
+{agent_context or '暂无'}
+
+【上一版完整文档】
+{previous}
+
+【完整历史对话】
+{history_text}
+
+请务必输出完整正式文档，不要只输出最近一轮回复，不要输出下载链接。
+""".strip()
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
 from agent_capabilities import extract_agent_memory, format_agent_context
-from utils import build_mock_chat_response, build_mock_full_document, format_tool_analysis, score_requirement_context
+try:
+    from utils import build_mock_chat_response, build_mock_full_document, format_tool_analysis, score_requirement_context
+except ImportError:
+    from utils import build_mock_chat_response, format_tool_analysis, score_requirement_context
+
+    def build_mock_full_document(
+        messages: list[dict[str, str]],
+        domain: str,
+        tool_analysis: str,
+        previous_document: str = "",
+        document_version: int = 1,
+    ) -> str:
+        user_texts = [m.get("content", "") for m in messages if m.get("role") == "user"]
+        topic = user_texts[0] if user_texts else "软件项目"
+        latest = user_texts[-1] if user_texts else "暂无"
+        return f"""# 软件需求工程分析文档
+
+## 文档信息
+
+- 文档版本：V{document_version}
+- 当前领域：{domain}
+- 文档状态：示例模式下生成的完整正式文档
+
+## 1. 愿景和范围
+
+本项目围绕“{topic}”开展需求工程分析，目标是将用户的多轮对话和确认信息整合为一份完整、可审阅、可导出的软件需求工程文档。
+
+## 2. 干系人与用户分析
+
+主要干系人包括普通用户、管理员、项目负责人、开发人员和测试人员。
+
+## 3. 用例分析
+
+- UC-01 用户登录与身份识别
+- UC-02 核心业务信息提交
+- UC-03 信息查询与筛选
+- UC-04 管理员审核与维护
+
+## 4. 软件需求规范
+
+### 功能需求
+
+- FR-01 系统应支持用户注册、登录和权限管理。
+- FR-02 系统应支持核心业务信息的新增、查询、修改和删除。
+- FR-03 系统应支持管理员审核、统计和配置。
+
+### 非功能需求
+
+- NFR-01 易用性：页面流程清晰。
+- NFR-02 安全性：区分角色权限并保护用户数据。
+- NFR-03 性能：常用查询需要在可接受时间内响应。
+
+## 5. 分析模型
+
+系统可划分为用户端、管理端、业务服务层、数据存储层和文档输出模块。
+
+## 6. 业务规则
+
+- BR-01 不同角色只能访问授权范围内的数据。
+- BR-02 关键业务操作需要进行数据校验。
+- BR-03 管理端应保留审核和操作记录。
+
+## 7. 界面原型说明
+
+主要页面包括登录页、首页、业务列表页、详情页、管理审核页和统计报表页。
+
+## 8. 验收标准
+
+核心业务流程可完整走通；主要数据能正确保存和查询；权限控制正确；PDF 文档可正常导出。
+
+## 9. 风险与改进方向
+
+风险包括需求范围扩大、用户角色不清、数据字段遗漏和验收标准过泛。后续可通过原型评审和测试用例反推继续完善。
+
+## 10. 版本变更记录
+
+本版文档基于历史对话生成，最新用户输入为：{latest}
+"""
 
 
 APP_TITLE = "软件需求工程分析智能体"
