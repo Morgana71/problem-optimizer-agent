@@ -18,9 +18,9 @@ import streamlit as st
 
 from llm_client import LLMConfig, PROVIDER_DEFAULTS, call_openai_compatible
 from pdf_generator import markdown_to_pdf_bytes, safe_filename_from_report
-from prompt_templates import build_chat_messages
+from prompt_templates import build_chat_messages, build_document_messages
 from agent_capabilities import extract_agent_memory, format_agent_context
-from utils import build_mock_chat_response, format_tool_analysis, score_requirement_context
+from utils import build_mock_chat_response, build_mock_full_document, format_tool_analysis, score_requirement_context
 
 
 APP_TITLE = "软件需求工程分析智能体"
@@ -201,8 +201,12 @@ def init_session_state() -> None:
         "last_pdf": b"",
         "last_run_time": "",
         "pdf_ready": False,
+        "current_document": "",
+        "document_version": 0,
+        "document_updated_at": "",
         "pending_user_input": "",
         "is_generating": False,
+        "is_document_generating": False,
         "last_error_trace": "",
     }
     for key, value in defaults.items():
@@ -262,6 +266,92 @@ def build_config(
     )
 
 
+
+def has_user_requirement(messages: list[dict[str, str]]) -> bool:
+    """判断当前会话中是否已有用户需求输入。"""
+    return any(m.get("role") == "user" and str(m.get("content", "")).strip() for m in messages)
+
+
+def build_overall_tool_analysis(messages: list[dict[str, str]]) -> str:
+    """基于完整历史用户输入生成文档级轻量分析。"""
+    quality = score_requirement_context(messages)
+    return (
+        f"综合需求质量评分：{quality.get('score', 0)} / 100\n"
+        f"综合清晰度等级：{quality.get('level', '暂无')}\n"
+        f"诊断依据：{quality.get('basis', '历史对话综合诊断')}\n"
+        f"累计用户轮次：{quality.get('turn_count', 0)}\n"
+        f"已包含要素：{'、'.join(quality.get('present_dimensions', [])) if quality.get('present_dimensions') else '暂无明显要素'}\n"
+        f"缺失要素：{'、'.join(quality.get('missing_dimensions', [])) if quality.get('missing_dimensions') else '未发现明显缺失'}\n"
+        f"关键词：{'、'.join(quality.get('keywords', [])) if quality.get('keywords') else '未提取到明显关键词'}"
+    )
+
+
+def generate_full_document_from_history(
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    enable_thinking: bool,
+    use_mock_mode: bool,
+    history_messages: list[dict[str, str]] | None = None,
+) -> str:
+    """基于完整历史对话生成/刷新当前最新版正式文档，并同步生成 PDF。
+
+    注意：PDF 永远由 current_document 转换得到，不再直接使用最近一条聊天回复。
+    """
+    history = history_messages or st.session_state.messages
+    if not has_user_requirement(history):
+        raise ValueError("当前还没有用户需求输入，无法生成完整正式文档。")
+
+    next_version = int(st.session_state.get("document_version", 0) or 0) + 1
+    document_updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tool_analysis = build_overall_tool_analysis(history)
+    previous_document = st.session_state.get("current_document", "")
+
+    if use_mock_mode:
+        document_text = build_mock_full_document(
+            messages=history,
+            domain=FIXED_DOMAIN,
+            tool_analysis=tool_analysis,
+            previous_document=previous_document,
+            document_version=next_version,
+        )
+    else:
+        document_max_tokens = min(12000, max(max_tokens, 8000))
+        config = build_config(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            max_tokens=document_max_tokens,
+            enable_thinking=enable_thinking,
+        )
+        document_messages = build_document_messages(
+            chat_history=history,
+            domain=FIXED_DOMAIN,
+            tool_analysis=tool_analysis,
+            agent_context=format_agent_context(history),
+            previous_document=previous_document,
+            document_version=next_version,
+        )
+        document_text = call_openai_compatible(document_messages, config)
+
+    document_text = clean_fake_download_links(document_text)
+    st.session_state.current_document = document_text
+    st.session_state.document_version = next_version
+    st.session_state.document_updated_at = document_updated_at
+    st.session_state.last_pdf = markdown_to_pdf_bytes(
+        document_text,
+        title="软件需求工程分析正式文档",
+    )
+    st.session_state.pdf_ready = True
+    st.session_state.last_run_time = document_updated_at
+    return document_text
+
+
 def generate_assistant_response(
     user_input: str,
     provider: str,
@@ -306,14 +396,22 @@ def generate_assistant_response(
     assistant_text = clean_fake_download_links(assistant_text)
     st.session_state.last_report = assistant_text
 
-    if should_generate_pdf(user_input, assistant_text):
-        st.session_state.last_pdf = markdown_to_pdf_bytes(
-            assistant_text,
-            title="软件需求工程分析智能体文档",
+    # 如果用户明确要求 PDF / 文档 / 报告，则自动基于完整历史对话刷新正式文档。
+    # 这里不会把“最近一条聊天回复”直接转成 PDF，而是单独生成 current_document。
+    if is_document_request(user_input):
+        history_for_document = st.session_state.messages + [{"role": "assistant", "content": assistant_text}]
+        generate_full_document_from_history(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            enable_thinking=enable_thinking,
+            use_mock_mode=use_mock_mode,
+            history_messages=history_for_document,
         )
-        st.session_state.pdf_ready = True
-    else:
-        st.session_state.pdf_ready = False
+
     return assistant_text
 
 
@@ -395,8 +493,12 @@ with st.sidebar:
             "last_pdf",
             "last_run_time",
             "pdf_ready",
+            "current_document",
+            "document_version",
+            "document_updated_at",
             "pending_user_input",
             "is_generating",
+            "is_document_generating",
             "last_error_trace",
         ]:
             st.session_state.pop(key, None)
@@ -476,9 +578,13 @@ with st.container():
             st.session_state.last_error_trace = ""
             st.rerun()
 
-        if st.session_state.pdf_ready and st.session_state.last_pdf:
-            st.success("已生成可下载的 PDF 文档。请使用下方“下载 PDF 文档”按钮获取文件。")
-            pdf_filename = safe_filename_from_report(st.session_state.last_report, suffix="pdf")
+        if st.session_state.current_document and st.session_state.pdf_ready and st.session_state.last_pdf:
+            version = st.session_state.get("document_version", 0)
+            updated_at = st.session_state.get("document_updated_at", "")
+            st.success(f"已生成当前最新版正式文档 V{version}。PDF 内容来自完整历史对话整合结果，而不是最近一条回复。")
+            if updated_at:
+                st.caption(f"文档更新时间：{updated_at}")
+            pdf_filename = safe_filename_from_report(st.session_state.current_document, suffix="pdf")
             pdf_col, preview_col = st.columns([0.72, 0.28])
             with pdf_col:
                 st.download_button(
@@ -489,9 +595,11 @@ with st.container():
                     use_container_width=True,
                 )
             with preview_col:
-                show_report_preview = st.toggle("预览报告内容", value=False)
+                show_report_preview = st.toggle("预览正式文档", value=False)
             if show_report_preview:
-                render_markdown_preview(st.session_state.last_report)
+                render_markdown_preview(st.session_state.current_document)
+        elif has_user_requirement(st.session_state.messages):
+            st.info("尚未生成完整正式文档。请点击右侧“生成 / 刷新完整正式文档”按钮，系统会基于全部历史对话生成最新版 PDF。")
         if st.session_state.get("last_error_trace"):
             with st.expander("查看最近错误详情"):
                 st.code(st.session_state.last_error_trace)
@@ -528,12 +636,31 @@ with st.container():
                         st.caption(item)
 
         st.divider()
-        if st.button("基于最近回答生成 PDF", use_container_width=True, disabled=not bool(st.session_state.last_report)):
-            cleaned_report = clean_fake_download_links(st.session_state.last_report)
-            st.session_state.last_report = cleaned_report
-            st.session_state.last_pdf = markdown_to_pdf_bytes(
-                cleaned_report,
-                title="软件需求工程分析智能体文档",
+        st.subheader("正式文档生成")
+        if st.session_state.current_document:
+            st.caption(
+                f"当前文档：V{st.session_state.get('document_version', 0)}"
+                + (f"，更新时间：{st.session_state.get('document_updated_at')}" if st.session_state.get('document_updated_at') else "")
             )
-            st.session_state.pdf_ready = True
-            st.success("PDF 已生成，请在对话区下方使用“下载 PDF 文档”按钮下载，并可预览报告正文。")
+        else:
+            st.caption("当前还没有完整正式文档。")
+
+        generate_disabled = (not has_user_requirement(st.session_state.messages)) or st.session_state.is_generating
+        if st.button("生成 / 刷新完整正式文档", use_container_width=True, disabled=generate_disabled):
+            with st.spinner("正在基于全部历史对话生成最新版正式文档……"):
+                try:
+                    generate_full_document_from_history(
+                        provider=provider,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        enable_thinking=enable_thinking,
+                        use_mock_mode=use_mock_mode,
+                        history_messages=st.session_state.messages,
+                    )
+                    st.success("最新版正式文档已生成。请在左侧对话区下方下载 PDF 或预览正式文档。")
+                except Exception as exc:
+                    st.session_state.last_error_trace = traceback.format_exc()
+                    st.error(f"正式文档生成失败：{exc}")
