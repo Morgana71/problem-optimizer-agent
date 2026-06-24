@@ -102,22 +102,25 @@ def score_question_quality(question: str) -> dict:
 def score_requirement_context(messages: list[dict[str, str]]) -> dict:
     """基于历史对话综合评估需求清晰度，避免只看最近一条短回复。"""
     user_texts = [m.get("content", "") for m in messages if m.get("role") == "user"]
-    assistant_texts = [m.get("content", "") for m in messages if m.get("role") == "assistant"]
     combined_user_text = "\n".join(user_texts).strip()
 
     if not combined_user_text:
-        result = score_question_quality("我想做一个校园二手交易平台，应该怎么做？")
-        result["turn_count"] = 0
-        result["basis"] = "示例需求"
-        return result
+        return {
+            "score": 0.0,
+            "level": "",
+            "present_dimensions": [],
+            "missing_dimensions": [],
+            "keywords": [],
+            "length": 0,
+            "turn_count": 0,
+            "basis": "等待用户输入",
+        }
 
-    # 用户输入代表真实需求来源；助手输出代表已经沉淀出的需求分析上下文。
-    assistant_context = "\n".join(assistant_texts[-3:])
-    combined_context = f"{combined_user_text}\n{assistant_context}".strip()
-    result = score_question_quality(combined_context)
+    # 评分主体只看用户已经提供/确认的信息，避免助手自动补全导致首轮模糊需求被误判为满分。
+    result = score_question_quality(combined_user_text)
 
     turn_count = len(user_texts)
-    progress_bonus = min(18, max(0, turn_count - 1) * 6)
+    progress_bonus = min(12, max(0, turn_count - 1) * 4)
 
     option_detail_patterns = [
         r"\b[ABCD]\b",
@@ -134,9 +137,10 @@ def score_requirement_context(messages: list[dict[str, str]]) -> dict:
         "约束",
     ]
     detail_hits = sum(1 for pattern in option_detail_patterns if re.search(pattern, combined_user_text, re.IGNORECASE))
-    detail_bonus = min(12, detail_hits * 2)
+    detail_bonus = min(10, detail_hits * 2)
 
-    accumulated_score = min(100, result["score"] + progress_bonus + detail_bonus)
+    first_turn_cap = 65 if turn_count <= 1 else 100
+    accumulated_score = min(first_turn_cap, result["score"] + progress_bonus + detail_bonus)
     result["score"] = round(accumulated_score, 1)
     result["turn_count"] = turn_count
     result["basis"] = "历史对话综合诊断"

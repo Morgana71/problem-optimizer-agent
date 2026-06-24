@@ -147,9 +147,13 @@ CHAT_USER_PROMPT_TEMPLATE = dedent(
     【系统轻量工具分析结果】
     {tool_analysis}
 
+    【智能体能力与会话记忆】
+    {agent_context}
+
     【回答要求】
     - 如果用户在咨询、追问、修改需求，请像专家型智能体一样主动设计，并给出下一步建议。
     - 如果用户输入很模糊，请先给出 2 到 3 个可选设计方向，推荐一个默认方向，再提出少量确认问题。
+    - 回答时必须参考“当前会话记忆”，不要重复追问已经确认的信息；如果用户补充了新信息，请把它合并进已有需求继续推进。
     - 如果用户要求生成 PDF、文档、报告、需求规格说明或详细方案，请输出完整 Markdown 文档。
     - 生成完整文档时，应优先采用范例结构：愿景和范围、用例、软件需求规范、分析模型、业务规则、界面原型。
     - 如果事实信息不足，请使用“默认假设 + 待确认问题”的方式先生成可审阅版本。
@@ -218,6 +222,7 @@ def build_chat_messages(
     user_input: str,
     domain: str,
     tool_analysis: str,
+    agent_context: str = "暂无",
     max_history: int = 8,
 ) -> list[dict[str, str]]:
     """构造对话式软件需求工程分析消息。"""
@@ -230,6 +235,7 @@ def build_chat_messages(
                 domain=domain,
                 user_input=user_input,
                 tool_analysis=tool_analysis,
+                agent_context=agent_context or "暂无",
             ),
         }
     )

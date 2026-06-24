@@ -17,8 +17,9 @@ from datetime import datetime
 import streamlit as st
 
 from llm_client import LLMConfig, PROVIDER_DEFAULTS, call_openai_compatible
-from pdf_generator import markdown_to_pdf_bytes, safe_filename_from_question
+from pdf_generator import markdown_to_pdf_bytes, safe_filename_from_report
 from prompt_templates import build_chat_messages
+from agent_capabilities import extract_agent_memory, format_agent_context
 from utils import build_mock_chat_response, format_tool_analysis, score_requirement_context
 
 
@@ -226,6 +227,7 @@ def generate_assistant_response(
             user_input=user_input,
             domain=FIXED_DOMAIN,
             tool_analysis=st.session_state.last_tool_analysis,
+            agent_context=format_agent_context(st.session_state.messages),
         )
         config = build_config(
             provider=provider,
@@ -348,15 +350,9 @@ with st.sidebar:
 st.markdown(f"<div class='main-header'><h1>🧠 {APP_TITLE}</h1></div>", unsafe_allow_html=True)
 st.caption(APP_SUBTITLE)
 
-chat_tab, document_tab, prompt_tab, deploy_tab = st.tabs([
-    "💬 智能体对话",
-    "📄 文档预览与下载",
-    "🧩 智能体设计",
-    "🌐 部署说明",
-])
+st.divider()
 
-
-with chat_tab:
+with st.container():
     left_col, right_col = st.columns([0.68, 0.32], gap="large")
 
     with left_col:
@@ -416,8 +412,22 @@ with chat_tab:
             st.session_state.last_error_trace = ""
             st.rerun()
 
-        if st.session_state.pdf_ready:
-            st.success("已生成可预览和下载的 PDF 文档，可在“文档预览与下载”页查看。")
+        if st.session_state.pdf_ready and st.session_state.last_pdf:
+            st.success("已生成可下载的 PDF 文档。")
+            pdf_filename = safe_filename_from_report(st.session_state.last_report, suffix="pdf")
+            pdf_col, preview_col = st.columns([0.72, 0.28])
+            with pdf_col:
+                st.download_button(
+                    "下载 PDF 文档",
+                    data=st.session_state.last_pdf,
+                    file_name=pdf_filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with preview_col:
+                show_pdf_preview = st.toggle("预览", value=False)
+            if show_pdf_preview:
+                render_pdf_preview(st.session_state.last_pdf)
         if st.session_state.get("last_error_trace"):
             with st.expander("查看最近错误详情"):
                 st.code(st.session_state.last_error_trace)
@@ -426,17 +436,32 @@ with chat_tab:
         st.subheader("实时需求诊断")
         quality = score_requirement_context(st.session_state.messages)
         st.metric("需求问题质量评分", f"{quality['score']} / 100")
-        st.write(f"**清晰度等级：** {quality['level']}")
-        st.write(f"**诊断依据：** {quality.get('basis', '历史对话综合诊断')}")
-        if quality.get("turn_count", 0):
+        if quality.get("turn_count", 0) == 0:
+            st.caption("请输入需求后，这里会显示实时诊断结果。")
+        else:
+            st.write(f"**清晰度等级：** {quality['level']}")
+            st.write(f"**诊断依据：** {quality.get('basis', '历史对话综合诊断')}")
             st.write(f"**累计用户轮次：** {quality['turn_count']}")
-        st.write("**已包含要素：**")
-        st.write("、".join(quality["present_dimensions"]) if quality["present_dimensions"] else "暂无明显要素")
-        st.write("**缺失要素：**")
-        st.write("、".join(quality["missing_dimensions"]) if quality["missing_dimensions"] else "未发现明显缺失")
-        st.write("**关键词：**")
-        st.write("、".join(quality["keywords"]) if quality["keywords"] else "未提取到明显关键词")
-        st.caption("该诊断会综合历史用户输入和已沉淀的需求分析内容，避免只按最近一条短回复评分。")
+            st.write("**已包含要素：**")
+            st.write("、".join(quality["present_dimensions"]) if quality["present_dimensions"] else "暂无明显要素")
+            st.write("**缺失要素：**")
+            st.write("、".join(quality["missing_dimensions"]) if quality["missing_dimensions"] else "未发现明显缺失")
+            st.write("**关键词：**")
+            st.write("、".join(quality["keywords"]) if quality["keywords"] else "未提取到明显关键词")
+            st.caption("该诊断会综合历史用户输入和已沉淀的需求分析内容，避免只按最近一条短回复评分。")
+
+            memory = extract_agent_memory(st.session_state.messages)
+            with st.expander("会话记忆"):
+                st.caption("智能体会把这些信息作为后续需求分析上下文。")
+                for key in ["产品主题", "用户角色", "核心功能", "约束偏好", "文档偏好", "选项确认"]:
+                    values = memory.get(key, [])
+                    if values:
+                        st.write(f"**{key}：** {'、'.join(str(item) for item in values)}")
+                recent_inputs = memory.get("最近用户输入", [])
+                if recent_inputs:
+                    st.write("**最近输入：**")
+                    for item in recent_inputs:
+                        st.caption(item)
 
         st.divider()
         if st.button("基于最近回答生成 PDF", use_container_width=True, disabled=not bool(st.session_state.last_report)):
@@ -445,87 +470,4 @@ with chat_tab:
                 title="软件需求工程分析智能体文档",
             )
             st.session_state.pdf_ready = True
-            st.success("PDF 已生成，请到“文档预览与下载”页查看。")
-
-
-with document_tab:
-    st.subheader("PDF 文档预览与下载")
-    if st.session_state.last_report:
-        st.caption(f"最近生成时间：{st.session_state.last_run_time or '暂无'}")
-        with st.expander("查看 Markdown 原文", expanded=not st.session_state.pdf_ready):
-            st.markdown(st.session_state.last_report)
-
-        if st.session_state.pdf_ready and st.session_state.last_pdf:
-            render_pdf_preview(st.session_state.last_pdf)
-            md_filename = safe_filename_from_question(st.session_state.last_question or "软件需求工程分析", suffix="md")
-            pdf_filename = safe_filename_from_question(st.session_state.last_question or "软件需求工程分析", suffix="pdf")
-            download_col1, download_col2 = st.columns(2)
-            with download_col1:
-                st.download_button(
-                    "下载 Markdown 文档",
-                    data=st.session_state.last_report.encode("utf-8"),
-                    file_name=md_filename,
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-            with download_col2:
-                st.download_button(
-                    "下载 PDF 文档",
-                    data=st.session_state.last_pdf,
-                    file_name=pdf_filename,
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-        else:
-            st.info("当用户要求生成 PDF / 文档，或智能体回答内容较多时，系统会自动生成 PDF。也可以在对话页手动生成。")
-    else:
-        st.info("请先在“智能体对话”页与智能体交流。生成较长内容或明确要求 PDF 后，这里会显示文档预览。")
-
-
-with prompt_tab:
-    st.subheader("智能体设计说明")
-    st.markdown(
-        """
-本系统现在固定面向 **软件需求工程分析**，采用对话式交互，而不是一次性表单提交。
-
-核心机制包括：
-
-1. **持续对话上下文**：保留最近多轮用户与智能体消息，使需求澄清可以逐步展开。  
-2. **需求工程角色约束**：智能体始终围绕需求澄清、利益相关者、功能需求、非功能需求、业务流程、验收标准等主题回答。  
-3. **轻量工具分析**：每轮用户输入都会进行问题质量评分、缺失要素分析和关键词提取。  
-4. **文档触发机制**：用户要求生成 PDF / 文档，或回答内容较长时，系统自动生成可预览和下载的 PDF。  
-5. **示例模式**：模型未配置时仍可演示聊天式交互和 PDF 预览下载流程。
-        """
-    )
-
-    with st.expander("查看当前智能体约束摘要"):
-        st.code(
-            """
-领域：软件需求工程分析
-交互方式：多轮对话
-工作流程：需求理解 → 缺失信息识别 → 澄清问题 → 需求建模 → 方案输出 → 文档生成
-PDF 触发：用户要求 PDF/文档/报告，或智能体输出较长内容
-输出要求：中文、结构化、适合课程作业和需求规格说明文档
-            """.strip(),
-            language="text",
-        )
-
-
-with deploy_tab:
-    st.subheader("公开部署流程")
-    st.markdown(
-        """
-推荐部署到 Streamlit Community Cloud：
-
-1. 将本项目上传到 GitHub；
-2. 确认 `.gitignore` 中已经忽略 `.streamlit/secrets.toml`；
-3. 在 Streamlit Cloud 中选择 GitHub 仓库和 `app.py`；
-4. 管理员在部署平台后台配置模型访问参数；
-5. 点击 Deploy，获得公开访问链接；
-6. 打开链接，与智能体进行需求工程分析对话；
-7. 要求智能体生成 PDF，展示页面内预览、下载和打开过程。
-
-模型访问参数由管理员在部署平台后台配置，公开页面不展示内部接口信息。
-        """
-    )
-    st.info("用户只需要选择模型并对话；模型访问参数均由应用内部配置读取。")
+            st.success("PDF 已生成，可在对话区下方下载或预览。")
