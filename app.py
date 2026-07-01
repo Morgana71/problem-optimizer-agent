@@ -641,7 +641,7 @@ with st.sidebar:
     secret_api_key = get_secret_value("api_key", "", provider_default.get("api_key_env"))
     secret_base_url = get_secret_value("base_url", provider_default["base_url"])
     secret_model = get_secret_value("model", provider_default["model"])
-    model_options = ["qwen-flash"]
+    model_options = ["deepseek-v4-flash"]
     if secret_model not in model_options:
         model_options.append(secret_model)
     model = st.selectbox("模型选择", model_options, index=model_options.index(secret_model))
@@ -655,11 +655,15 @@ with st.sidebar:
 
     temperature = st.slider("生成随机性 temperature", 0.0, 1.0, 0.3, 0.05)
     max_tokens = st.slider("最大输出 tokens", 1000, 12000, 5000, 500)
-    enable_thinking = st.checkbox(
-        "启用模型思考 enable_thinking",
-        value=True,
-        help='对应阿里云百炼 OpenAI-compatible 示例中的 extra_body={"enable_thinking": True}。',
-    )
+    if any(name in provider for name in ["阿里云", "百炼", "Qwen", "通义"]):
+        enable_thinking = st.checkbox(
+            "启用模型思考 enable_thinking",
+            value=True,
+            help='该参数主要用于阿里云百炼 / Qwen OpenAI-compatible 接口。',
+        )
+    else:
+        enable_thinking = False
+    st.caption("当前模型不使用 enable_thinking 参数；DeepSeek 请通过模型名选择 flash / pro。")
     api_key_available = bool(api_key) and "REPLACE" not in api_key.upper()
     use_mock_mode = not api_key_available
     if use_mock_mode:
