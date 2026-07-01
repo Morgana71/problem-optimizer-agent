@@ -53,13 +53,18 @@ def call_openai_compatible(messages: list[dict[str, str]], config: LLMConfig) ->
         "Content-Type": "application/json",
     }
     payload: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "enable_thinking": config.enable_thinking,
-        "stream": False,
+    "model": config.model,
+    "messages": messages,
+    "temperature": config.temperature,
+    "max_tokens": config.max_tokens,
+    "stream": False,
     }
+
+    # enable_thinking 是阿里云百炼 / Qwen 的扩展参数。
+    # DeepSeek 使用模型名区分能力，不向其发送该字段，避免 API 报错。
+    if any(name in config.provider for name in ["阿里云", "百炼", "Qwen", "通义"]):
+        payload["enable_thinking"] = config.enable_thinking
+ 
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=config.timeout)
@@ -83,6 +88,11 @@ def call_openai_compatible(messages: list[dict[str, str]], config: LLMConfig) ->
 
 
 PROVIDER_DEFAULTS = {
+    "DeepSeek": {
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "api_key_env": "DEEPSEEK_API_KEY",
+    },
     "阿里云百炼 / Qwen": {
         "base_url": "https://llm-dks5jdo39k1dk6wb.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         "model": "qwen-flash",
